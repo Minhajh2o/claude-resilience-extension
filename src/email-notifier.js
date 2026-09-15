@@ -15,7 +15,9 @@ export class SecureEmailNotifier {
       'CLAUDE_TASK_COMPLETED',
       'CLAUDE_RATE_LIMIT_HIT',
       'CLAUDE_NETWORK_ERROR',
-      'CLAUDE_HEARTBEAT_TIMEOUT'
+      'CLAUDE_HEARTBEAT_TIMEOUT',
+      'CLAUDE_QUOTA_RESET',        
+      'CLAUDE_AUTO_RESUMED'        
     ]);
   }
 

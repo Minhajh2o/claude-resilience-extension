@@ -1,23 +1,74 @@
 /**
  * src/content.js
- * Observes Claude.ai DOM states safely and sends IPC updates
+ * Observes Claude.ai DOM, extracts reset time, and auto-resumes
  */
 (() => {
   let isGenerating = false;
   let lastReportedLimit = 0;
 
-  // 1. Respond to background health check heartbeats
+  // Listen for actions dispatched by the background worker
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type === 'PING_HEARTBEAT') {
       sendResponse({ status: 'ALIVE', url: window.location.href });
     }
+
+    // Command from background to automatically resume conversation
+    if (msg.type === 'EXECUTE_AUTO_RESUME') {
+      const resumed = attemptAutoResume();
+      sendResponse({ success: resumed });
+    }
   });
 
-  // 2. Safe DOM scanner
+  // Helper to parse Claude's "until 4:30 PM" or "until 5 PM" text into a timestamp
+  function parseResetTime(text) {
+    const match = text.match(/until\s+(\d{1,2}(?::\d{2})?\s*(?:AM|PM)?)/i);
+    if (!match) return null;
+
+    const timeStr = match[1];
+    const now = new Date();
+    const parsedDate = new Date(`${now.toDateString()} ${timeStr}`);
+
+    // If parsed time is earlier than now, it belongs to the next day
+    if (parsedDate.getTime() <= now.getTime()) {
+      parsedDate.setDate(parsedDate.getDate() + 1);
+    }
+
+    return {
+      timeStr: timeStr,
+      timestamp: parsedDate.getTime()
+    };
+  }
+
+  // Helper to automatically click Retry or type "Continue"
+  function attemptAutoResume() {
+    // 1. Check if there's a visible "Retry" button
+    const retryBtn = document.querySelector('button[aria-label*="Retry"], button:has(svg)');
+    if (retryBtn && retryBtn.innerText.toLowerCase().includes('retry')) {
+      retryBtn.click();
+      return true;
+    }
+
+    // 2. Otherwise find the prompt input box and submit "Please continue."
+    const inputBox = document.querySelector('div[contenteditable="true"], textarea');
+    if (inputBox) {
+      inputBox.focus();
+      document.execCommand('insertText', false, 'Please continue.');
+
+      // Click the send button after a small delay
+      setTimeout(() => {
+        const sendBtn = document.querySelector('button[aria-label*="Send"], button[data-testid*="send-button"]');
+        if (sendBtn) sendBtn.click();
+      }, 500);
+      return true;
+    }
+
+    return false;
+  }
+
   function inspectClaudeDOM() {
     const pageText = document.body ? document.body.innerText : '';
 
-    // Detect free-tier rate limits
+    // Check for rate limit banners
     if (
       pageText.includes('free message limit') ||
       pageText.includes('reached your limit') ||
@@ -25,19 +76,22 @@
       pageText.includes('out of free messages')
     ) {
       const now = Date.now();
-      // Debounce limit notification to once every 10 minutes
       if (now - lastReportedLimit > 10 * 60 * 1000) {
         lastReportedLimit = now;
+
+        const resetInfo = parseResetTime(pageText);
+
         chrome.runtime.sendMessage({
           type: 'CLAUDE_LIMIT_DETECTED',
-          details: 'Claude displayed a free tier rate limit banner on the page.'
+          details: `Claude free-tier limit hit. Estimated reset: ${resetInfo ? resetInfo.timeStr : 'Unknown'}`,
+          resetTimestamp: resetInfo ? resetInfo.timestamp : null,
+          resetTimeStr: resetInfo ? resetInfo.timeStr : null
         });
       }
       return;
     }
 
-    // Detect generation state
-    // While streaming, Claude renders a button with an aria-label or testid containing "Stop"
+    // Streaming detection
     const stopButton = document.querySelector(
       'button[aria-label*="Stop"], button[data-testid*="stop-button"], button[aria-label*="Cancel"]'
     );
@@ -46,7 +100,6 @@
       isGenerating = true;
       chrome.runtime.sendMessage({ type: 'CLAUDE_STREAM_START' });
     } else if (!stopButton && isGenerating) {
-      // Button disappeared -> Response complete
       isGenerating = false;
       chrome.runtime.sendMessage({
         type: 'CLAUDE_STREAM_COMPLETE',
@@ -55,24 +108,15 @@
     }
   }
 
-  // 3. Attach MutationObserver
   const observer = new MutationObserver(() => {
     inspectClaudeDOM();
   });
 
-  observer.observe(document.body, {
-    childList: true,
-    subtree: true
-  });
+  observer.observe(document.body, { childList: true, subtree: true });
 
-  // 4. Periodic background keep-alive ping
   setInterval(() => {
     chrome.runtime.sendMessage({ type: 'CLAUDE_HEARTBEAT' }, () => {
-      if (chrome.runtime.lastError) {
-        // Service worker sleeping; will wake on next trigger
-      }
+      if (chrome.runtime.lastError) {}
     });
   }, 45000);
-
-  console.log('[Claude Resilience] Content script active and monitoring.');
 })();
