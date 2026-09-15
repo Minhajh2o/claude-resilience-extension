@@ -1,319 +1,207 @@
 /**
- * Background Service Worker
- * Manages checkpoint storage, monitoring, and email notifications
+ * src/background.js
+ * Complete Resilient Service Worker with State Recovery & Security
  */
+import { SecureEmailNotifier } from './email-notifier.js';
 
-console.log('[Claude Resilience] Background service worker loaded');
+const notifier = new SecureEmailNotifier();
 
-// Global monitoring state
-const monitoringState = {
-  activeMonitors: new Map(), // conversationId -> monitor info
-  emailNotifications: true
+// Global resilience state
+const State = {
+  activeTabs: new Map(), // tabId -> { lastHeartbeat, status, retryCount }
+  stats: {
+    recoveredSessions: 0,
+    alertsSent: 0,
+    startTime: Date.now()
+  }
 };
 
-/**
- * Listen for messages from content script
- */
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  console.log('[Claude Resilience] Message received:', request.type);
+// ==========================================
+// 1. KEEP-ALIVE & ALARM SYSTEM
+// ==========================================
+chrome.alarms.create('resilienceHeartbeat', { periodInMinutes: 1 });
+chrome.alarms.create('stateCleanup', { periodInMinutes: 5 });
 
-  if (request.type === 'RATE_LIMIT_HIT') {
-    handleRateLimitHit(request.payload);
-    sendResponse({ success: true });
-  }
-
-  if (request.type === 'TOKENS_AVAILABLE') {
-    handleTokensAvailable(request.payload);
-    sendResponse({ success: true });
-  }
-
-  if (request.type === 'GET_CHECKPOINTS') {
-    chrome.storage.local.get('checkpoints', (result) => {
-      sendResponse({ checkpoints: result.checkpoints || {} });
-    });
-    return true; // Async response
-  }
-
-  if (request.type === 'GET_CONVERSATIONS') {
-    chrome.storage.local.get('conversations', (result) => {
-      sendResponse({ conversations: result.conversations || {} });
-    });
-    return true; // Async response
-  }
-
-  if (request.type === 'RESUME_CONVERSATION') {
-    resumeConversation(request.payload);
-    sendResponse({ success: true });
-  }
-
-  if (request.type === 'DELETE_CHECKPOINT') {
-    deleteCheckpoint(request.payload.checkpointId);
-    sendResponse({ success: true });
-  }
-
-  if (request.type === 'CONFIGURE_EMAIL') {
-    configureEmailSettings(request.payload);
-    sendResponse({ success: true });
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === 'resilienceHeartbeat') {
+    await performHeartbeatAudit();
+  } else if (alarm.name === 'stateCleanup') {
+    cleanupStaleSessions();
   }
 });
 
-/**
- * Handle rate limit detection
- */
-async function handleRateLimitHit(checkpoint) {
-  console.log('[Claude Resilience] Rate limit hit. Starting monitoring...');
+async function performHeartbeatAudit() {
+  chrome.tabs.query({ url: 'https://claude.ai/*' }, (tabs) => {
+    const currentTabIds = new Set(tabs.map(t => t.id));
 
-  // Save checkpoint
-  await new Promise((resolve) => {
-    chrome.storage.local.get('checkpoints', (result) => {
-      const checkpoints = result.checkpoints || {};
-      checkpoints[checkpoint.id] = checkpoint;
-      chrome.storage.local.set({ checkpoints }, resolve);
-    });
-  });
-
-  // Update badge
-  chrome.action.setBadgeText({ text: '⏳' });
-  chrome.action.setBadgeBackgroundColor({ color: '#FFA500' });
-
-  // Start monitoring for token availability
-  startMonitoring(checkpoint);
-
-  // Send email notification
-  if (monitoringState.emailNotifications) {
-    await sendEmail({
-      subject: `⏳ Claude Hit Rate Limit: ${checkpoint.conversationTitle}`,
-      body: `Your Claude conversation hit the free tier rate limit.
-      
-Conversation: ${checkpoint.conversationTitle || 'Untitled'}
-Time: ${new Date(checkpoint.timestamp).toLocaleString()}
-
-Your progress has been auto-saved. You'll receive another email when tokens are available.`,
-      checkpointId: checkpoint.id
-    });
-  }
-
-  console.log('[Claude Resilience] Checkpoint saved and monitoring started');
-}
-
-/**
- * Start monitoring for token availability
- */
-function startMonitoring(checkpoint) {
-  // Don't start multiple monitors for same conversation
-  if (monitoringState.activeMonitors.has(checkpoint.id)) {
-    console.log('[Claude Resilience] Monitor already active for this checkpoint');
-    return;
-  }
-
-  const maxWaitTime = 24 * 60 * 60 * 1000; // 24 hours
-  const startTime = Date.now();
-  let lastNotificationTime = startTime;
-  const notificationInterval = 4 * 60 * 60 * 1000; // Notify every 4 hours
-
-  const monitor = setInterval(async () => {
-    const elapsedTime = Date.now() - startTime;
-
-    // Check if max wait time exceeded
-    if (elapsedTime > maxWaitTime) {
-      console.log('[Claude Resilience] Max wait time exceeded, stopping monitor');
-      
-      clearInterval(monitor);
-      monitoringState.activeMonitors.delete(checkpoint.id);
-      
-      if (monitoringState.emailNotifications) {
-        await sendEmail({
-          subject: `❌ Token Wait Timeout: ${checkpoint.conversationTitle}`,
-          body: `Your Claude conversation monitoring stopped after waiting 24 hours.
-
-Conversation: ${checkpoint.conversationTitle || 'Untitled'}
-
-Your progress was saved. You can resume manually from the extension popup.`,
-          checkpointId: checkpoint.id
-        });
+    // Remove closed tabs
+    for (const tabId of State.activeTabs.keys()) {
+      if (!currentTabIds.has(tabId)) {
+        State.activeTabs.delete(tabId);
       }
-
-      chrome.action.setBadgeText({ text: '❌' });
-      return;
     }
 
-    // Send periodic "still waiting" notification
-    if (elapsedTime - lastNotificationTime > notificationInterval) {
-      if (monitoringState.emailNotifications) {
-        const hoursWaited = Math.round(elapsedTime / (60 * 60 * 1000));
-        await sendEmail({
-          subject: `⏳ Still Waiting: ${checkpoint.conversationTitle} (${hoursWaited}h)`,
-          body: `Still waiting for tokens to become available...
-
-Conversation: ${checkpoint.conversationTitle || 'Untitled'}
-Time Waiting: ${hoursWaited} hours
-
-The extension is monitoring and will notify you when tokens are available.`
-        });
-      }
-      lastNotificationTime = Date.now();
-    }
-
-    console.log(`[Claude Resilience] Monitoring checkpoint ${checkpoint.id.substring(0, 20)}...`);
-  }, 30000); // Check every 30 seconds
-
-  monitoringState.activeMonitors.set(checkpoint.id, {
-    monitor,
-    startTime,
-    checkpoint
-  });
-}
-
-/**
- * Handle tokens availability detection
- */
-async function handleTokensAvailable(data) {
-  console.log('[Claude Resilience] Tokens available detected!');
-
-  // Find the checkpoint we were monitoring
-  const checkpointId = data.checkpointId;
-  const monitorInfo = monitoringState.activeMonitors.get(checkpointId);
-
-  if (monitorInfo) {
-    // Stop monitoring
-    clearInterval(monitorInfo.monitor);
-    monitoringState.activeMonitors.delete(checkpointId);
-
-    const checkpoint = monitorInfo.checkpoint;
-    const waitedTime = formatWaitTime(Date.now() - monitorInfo.startTime);
-
-    // Send email notification
-    if (monitoringState.emailNotifications) {
-      await sendEmail({
-        subject: `✅ Claude Tokens Available: ${checkpoint.conversationTitle}`,
-        body: `Good news! Your free tier tokens are available again.
-
-Conversation: ${checkpoint.conversationTitle || 'Untitled'}
-Waited: ${waitedTime}
-
-You can resume your conversation now. Click the extension popup to resume.`,
-        checkpointId: checkpointId,
-        action: 'resume'
+    // Ping active tabs to ensure content script responsiveness
+    tabs.forEach((tab) => {
+      chrome.tabs.sendMessage(tab.id, { type: 'PING_HEARTBEAT' }, (response) => {
+        if (chrome.runtime.lastError) {
+          // Tab may have crashed or navigated
+          handleUnresponsiveTab(tab.id);
+        } else if (response?.status === 'ALIVE') {
+          updateTabState(tab.id, 'ACTIVE');
+        }
       });
+    });
+  });
+}
+
+function handleUnresponsiveTab(tabId) {
+  const tabData = State.activeTabs.get(tabId);
+  if (!tabData) return;
+
+  tabData.retryCount = (tabData.retryCount || 0) + 1;
+  console.warn(`[Resilience] Tab ${tabId} unresponsive. Attempt: ${tabData.retryCount}`);
+
+  if (tabData.retryCount >= 3) {
+    notifier.sendAlert({
+      event: 'CLAUDE_NETWORK_ERROR',
+      title: 'Claude Tab Connection Lost',
+      details: `Tab ${tabId} stopped responding to heartbeats after 3 attempts.`
+    });
+    tabData.retryCount = 0; // reset
+  }
+}
+
+function updateTabState(tabId, status, extra = {}) {
+  const existing = State.activeTabs.get(tabId) || { retryCount: 0 };
+  State.activeTabs.set(tabId, {
+    ...existing,
+    status,
+    lastHeartbeat: Date.now(),
+    ...extra
+  });
+  updateExtensionBadge(status);
+}
+
+function cleanupStaleSessions() {
+  const now = Date.now();
+  for (const [tabId, data] of State.activeTabs.entries()) {
+    if (now - data.lastHeartbeat > 10 * 60 * 1000) {
+      State.activeTabs.delete(tabId);
     }
-
-    // Update badge
-    chrome.action.setBadgeText({ text: '✅' });
-    chrome.action.setBadgeBackgroundColor({ color: '#00AA00' });
-
-    console.log('[Claude Resilience] Tokens available! Email sent.');
   }
 }
 
-/**
- * Resume a saved conversation
- */
-async function resumeConversation(payload) {
-  const { checkpointId, tabId } = payload;
+// ==========================================
+// 2. BADGE & UI STATUS
+// ==========================================
+function updateExtensionBadge(status) {
+  let text = '';
+  let color = '#475569';
 
-  // Get checkpoint
-  const checkpoint = await new Promise((resolve) => {
-    chrome.storage.local.get('checkpoints', (result) => {
-      const checkpoint = (result.checkpoints || {})[checkpointId];
-      resolve(checkpoint);
-    });
-  });
-
-  if (!checkpoint) {
-    console.error('[Claude Resilience] Checkpoint not found:', checkpointId);
-    return;
+  switch (status) {
+    case 'ACTIVE':
+    case 'STREAMING':
+      text = 'RUN';
+      color = '#0284c7';
+      break;
+    case 'RATE_LIMITED':
+      text = 'WAIT';
+      color = '#e11d48';
+      break;
+    case 'COMPLETED':
+      text = 'DONE';
+      color = '#16a34a';
+      break;
+    default:
+      text = '';
   }
 
-  console.log('[Claude Resilience] Resuming conversation:', checkpoint.conversationId);
-
-  // Navigate to conversation
-  if (checkpoint.conversationId) {
-    const url = `https://claude.ai/chat/${checkpoint.conversationId}`;
-    chrome.tabs.update(tabId, { url });
-  }
-
-  // Mark as resumed
-  checkpoint.status = 'resumed';
-  checkpoint.resumedAt = new Date().toISOString();
-
-  await new Promise((resolve) => {
-    chrome.storage.local.get('checkpoints', (result) => {
-      const checkpoints = result.checkpoints || {};
-      checkpoints[checkpointId] = checkpoint;
-      chrome.storage.local.set({ checkpoints }, resolve);
-    });
-  });
+  chrome.action.setBadgeText({ text });
+  chrome.action.setBadgeBackgroundColor({ color });
 }
 
-/**
- * Delete a checkpoint
- */
-async function deleteCheckpoint(checkpointId) {
-  return new Promise((resolve) => {
-    chrome.storage.local.get('checkpoints', (result) => {
-      const checkpoints = result.checkpoints || {};
-      delete checkpoints[checkpointId];
-      chrome.storage.local.set({ checkpoints }, resolve);
-    });
-  });
-}
-
-/**
- * Send email notification
- */
-async function sendEmail(options) {
-  // Get email settings from storage
-  const settings = await new Promise((resolve) => {
-    chrome.storage.sync.get('emailSettings', (result) => {
-      resolve(result.emailSettings || {});
-    });
-  });
-
-  if (!settings.enabled || !settings.emailAddress) {
-    console.log('[Claude Resilience] Email notifications not configured');
-    return;
+// ==========================================
+// 3. SECURE MESSAGE LISTENER (IPC)
+// ==========================================
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // SECURITY CHECK 1: Ensure message originates from our extension
+  if (sender.id !== chrome.runtime.id) {
+    console.warn('[Security] Message rejected: Untrusted extension ID');
+    sendResponse({ status: 'REJECTED_UNAUTHORIZED' });
+    return false;
   }
 
-  // For now, store the email in storage for the user to review
-  // In production, this would call a backend service to send actual emails
-  await new Promise((resolve) => {
-    chrome.storage.local.get('sentEmails', (result) => {
-      const emails = result.sentEmails || [];
-      emails.push({
-        id: `email-${Date.now()}`,
-        timestamp: new Date().toISOString(),
-        subject: options.subject,
-        body: options.body,
-        to: settings.emailAddress,
-        sent: false // Will be updated when actually sent
+  // SECURITY CHECK 2: Ensure origin matches official Claude domain
+  if (!sender.url || !sender.url.startsWith('https://claude.ai/')) {
+    console.warn('[Security] Message rejected: Invalid origin URL', sender.url);
+    sendResponse({ status: 'REJECTED_ORIGIN' });
+    return false;
+  }
+
+  const tabId = sender.tab?.id;
+
+  // Process authorized event handlers
+  switch (message.type) {
+    case 'CLAUDE_HEARTBEAT':
+      updateTabState(tabId, 'ACTIVE');
+      sendResponse({ status: 'ACKNOWLEDGED' });
+      break;
+
+    case 'CLAUDE_STREAM_START':
+      updateTabState(tabId, 'STREAMING');
+      sendResponse({ status: 'STREAMING_LOGGED' });
+      break;
+
+    case 'CLAUDE_STREAM_COMPLETE':
+      updateTabState(tabId, 'COMPLETED');
+      notifier.sendAlert({
+        event: 'CLAUDE_TASK_COMPLETED',
+        title: 'Claude Response Finished',
+        details: message.details || 'Claude has finished generating your response.'
+      }).then(res => {
+        if (res.success) State.stats.alertsSent++;
       });
-      chrome.storage.local.set({ sentEmails: emails }, resolve);
-    });
-  });
+      sendResponse({ status: 'COMPLETE_HANDLED' });
+      break;
 
-  console.log('[Claude Resilience] Email queued:', options.subject);
-}
+    case 'CLAUDE_LIMIT_DETECTED':
+      updateTabState(tabId, 'RATE_LIMITED');
+      notifier.sendAlert({
+        event: 'CLAUDE_RATE_LIMIT_HIT',
+        title: 'Claude Free-Tier Limit Hit',
+        details: message.details || 'Claude free tier rate limit reached. Generation paused.'
+      }).then(res => {
+        if (res.success) State.stats.alertsSent++;
+      });
+      sendResponse({ status: 'LIMIT_HANDLED' });
+      break;
 
-/**
- * Configure email settings
- */
-async function configureEmailSettings(settings) {
-  return new Promise((resolve) => {
-    chrome.storage.sync.set({ emailSettings: settings }, resolve);
-  });
-}
+    case 'GET_STATUS_METRICS':
+      sendResponse({
+        activeTabsCount: State.activeTabs.size,
+        stats: State.stats,
+        uptimeMinutes: Math.round((Date.now() - State.stats.startTime) / 60000)
+      });
+      break;
 
-/**
- * Format wait time nicely
- */
-function formatWaitTime(ms) {
-  const hours = Math.floor(ms / (60 * 60 * 1000));
-  const minutes = Math.floor((ms % (60 * 60 * 1000)) / 60000);
-
-  if (hours > 0) {
-    return `${hours}h ${minutes}m`;
+    default:
+      sendResponse({ status: 'UNKNOWN_MESSAGE_TYPE' });
   }
-  return `${minutes}m`;
-}
 
-console.log('[Claude Resilience] Background service worker ready');
+  return true; // Keep channel open for async handlers
+});
+
+// ==========================================
+// 4. TAB EVENT LISTENERS
+// ==========================================
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (State.activeTabs.has(tabId)) {
+    State.activeTabs.delete(tabId);
+    if (State.activeTabs.size === 0) {
+      updateExtensionBadge('');
+    }
+  }
+});
+
+console.log('[Claude Resilience] Secure background service worker initialized.');

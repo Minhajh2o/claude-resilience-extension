@@ -1,130 +1,102 @@
 /**
- * email-notifier.js
- * High-Security Notification Module for Claude Resilience Extension
- * Manifest V3 Service Worker Compatible
+ * src/email-notifier.js
+ * High-Security Notification Engine for Claude Resilience Extension
  */
 
-class SecureEmailNotifier {
+export class SecureEmailNotifier {
   constructor() {
-    // Defense against runaway loops / wallet-draining API abuse
     this.RATE_LIMIT = {
-      MAX_EMAILS_PER_HOUR: 15,
-      MIN_INTERVAL_SECONDS: 45, // Minimum seconds between two emails
+      MAX_PER_HOUR: 10,
+      MIN_COOLDOWN_SECONDS: 60,
       history: []
     };
 
-    // Allowed status types to reject malicious spoofed actions
-    this.ALLOWED_EVENTS = new Set([
+    this.VALID_EVENTS = new Set([
       'CLAUDE_TASK_COMPLETED',
       'CLAUDE_RATE_LIMIT_HIT',
-      'CLAUDE_SESSION_CRASHED',
-      'CLAUDE_PROMPT_WAITING',
+      'CLAUDE_NETWORK_ERROR',
       'CLAUDE_HEARTBEAT_TIMEOUT'
     ]);
   }
 
   /**
-   * Sanitizes strings to prevent HTML/XSS injection into emails
-   * Safe for background service workers (no DOM access required)
+   * Sanitizes all output to prevent HTML or script injection in emails.
    */
-  sanitizeText(str) {
-    if (typeof str !== 'string') return '';
-    return str
+  sanitize(input) {
+    if (typeof input !== 'string') return '';
+    return input
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#039;')
-      .slice(0, 5000); // Limit length to avoid buffer/payload abuse
+      .slice(0, 4000);
   }
 
   /**
-   * Validates if sending is permitted under rate-limiting constraints
+   * Anti-spam and loop protection.
    */
   canSend() {
     const now = Date.now();
     const oneHourAgo = now - 3600 * 1000;
-
-    // Filter out records older than 1 hour
     this.RATE_LIMIT.history = this.RATE_LIMIT.history.filter(ts => ts > oneHourAgo);
 
-    if (this.RATE_LIMIT.history.length >= this.RATE_LIMIT.MAX_EMAILS_PER_HOUR) {
+    if (this.RATE_LIMIT.history.length >= this.RATE_LIMIT.MAX_PER_HOUR) {
       console.warn('[Security] Notification blocked: Exceeded hourly rate limit.');
       return false;
     }
 
     const lastSent = this.RATE_LIMIT.history[this.RATE_LIMIT.history.length - 1] || 0;
-    if ((now - lastSent) < (this.RATE_LIMIT.MIN_INTERVAL_SECONDS * 1000)) {
-      console.warn('[Security] Notification throttled: Triggered too quickly.');
+    if (now - lastSent < this.RATE_LIMIT.MIN_COOLDOWN_SECONDS * 1000) {
+      console.warn('[Security] Notification throttled: Minimum cooldown active.');
       return false;
     }
 
     return true;
   }
 
-  /**
-   * Loads configurations securely from chrome.storage.local
-   * Secrets are NEVER hardcoded in source code
-   */
-  async getConfig() {
+  async getCredentials() {
     return new Promise((resolve) => {
-      chrome.storage.local.get(['emailConfig'], (result) => {
-        if (!result.emailConfig) {
-          resolve(null);
-        } else {
-          resolve(result.emailConfig);
-        }
+      chrome.storage.local.get(['resilienceConfig'], (res) => {
+        resolve(res.resilienceConfig || null);
       });
     });
   }
 
-  /**
-   * Core notification dispatcher
-   * @param {Object} payload 
-   * @param {string} payload.event - Must be one of ALLOWED_EVENTS
-   * @param {string} payload.title - Notification title
-   * @param {string} payload.details - Descriptive context (sanitized)
-   */
-  async notify({ event, title, details }) {
-    // 1. Strict Event Validation
-    if (!this.ALLOWED_EVENTS.has(event)) {
-      console.error(`[Security] Rejected unauthorized event type: ${event}`);
-      return { success: false, reason: 'INVALID_EVENT' };
+  async sendAlert({ event, title, details }) {
+    if (!this.VALID_EVENTS.has(event)) {
+      console.error(`[Security] Rejected unauthorized event: ${event}`);
+      return { success: false, error: 'INVALID_EVENT' };
     }
 
-    // 2. Enforce Anti-Spam / Anti-Drain Rate Limit
     if (!this.canSend()) {
-      return { success: false, reason: 'RATE_LIMITED' };
+      return { success: false, error: 'RATE_LIMITED' };
     }
 
-    // 3. Load user credentials safely
-    const config = await this.getConfig();
-    if (!config || !config.apiKey || !config.toEmail) {
-      console.error('[EmailNotifier] Missing valid email configuration.');
-      return { success: false, reason: 'MISSING_CONFIGURATION' };
+    const config = await this.getCredentials();
+    if (!config?.apiKey || !config?.toEmail) {
+      console.warn('[EmailNotifier] Email notifications not configured in popup.');
+      return { success: false, error: 'NOT_CONFIGURED' };
     }
 
-    // 4. Sanitize inputs against Prompt/HTML Injection
-    const safeTitle = this.sanitizeText(title || `Claude Notification: ${event}`);
-    const safeDetails = this.sanitizeText(details || 'No additional details provided.');
-    const timestamp = new Date().toISOString();
+    const safeTitle = this.sanitize(title || `Claude Alert: ${event}`);
+    const safeDetails = this.sanitize(details || 'No additional details provided.');
+    const timestamp = new Date().toLocaleString();
 
-    // 5. Construct Safe Payload (Default provider: Resend API)
-    // You can switch to SendGrid or a self-hosted webhook server
-    const emailPayload = {
-      from: config.fromEmail || 'Claude Resilience <notifications@resend.dev>',
+    const payload = {
+      from: 'Claude Resilience <onboarding@resend.dev>',
       to: [config.toEmail],
-      subject: `[Claude Alert] ${safeTitle}`,
+      subject: `[Claude Resilience] ${safeTitle}`,
       html: `
-        <div style="font-family: Arial, sans-serif; padding: 20px; color: #222; border: 1px solid #e0e0e0; border-radius: 8px;">
-          <h2 style="color: #d97706; margin-top: 0;">Claude Resilience Alert</h2>
-          <p><strong>Event:</strong> <code>${this.sanitizeText(event)}</code></p>
-          <p><strong>Timestamp:</strong> ${timestamp}</p>
-          <hr style="border: 0; border-top: 1px solid #eee; margin: 15px 0;">
-          <p><strong>Details:</strong></p>
-          <pre style="background: #f4f4f5; padding: 12px; border-radius: 4px; white-space: pre-wrap;">${safeDetails}</pre>
-          <p style="font-size: 11px; color: #71717a; margin-top: 25px;">
-            Sent securely by your Claude Resilience Extension.
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 20px; color: #1e293b; border: 1px solid #e2e8f0; border-radius: 8px;">
+          <h2 style="color: #ea580c; margin-top: 0;">Claude Resilience Alert</h2>
+          <p style="margin: 4px 0;"><strong>Event:</strong> <code>${this.sanitize(event)}</code></p>
+          <p style="margin: 4px 0;"><strong>Timestamp:</strong> ${timestamp}</p>
+          <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 16px 0;">
+          <p style="font-weight: bold; margin-bottom: 6px;">Status Information:</p>
+          <pre style="background: #f8fafc; padding: 12px; border-radius: 6px; white-space: pre-wrap; font-size: 13px; border: 1px solid #cbd5e1;">${safeDetails}</pre>
+          <p style="font-size: 11px; color: #94a3b8; margin-top: 20px;">
+            Sent automatically by Claude Resilience Extension.
           </p>
         </div>
       `
@@ -137,30 +109,20 @@ class SecureEmailNotifier {
           'Authorization': `Bearer ${config.apiKey.trim()}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify(emailPayload)
+        body: JSON.stringify(payload)
       });
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
-        throw new Error(`HTTP ${response.status}: ${errorData.message || 'Transmission failed'}`);
+        throw new Error(`HTTP ${response.status}: ${errorData.message || 'API request rejected'}`);
       }
 
-      // Record successful dispatch timestamp
       this.RATE_LIMIT.history.push(Date.now());
-      console.log(`[EmailNotifier] Alert sent successfully: ${event}`);
+      console.log(`[EmailNotifier] Alert delivered successfully: ${event}`);
       return { success: true };
-
     } catch (err) {
-      // Do not log raw headers or API keys in standard error outputs
-      console.error('[EmailNotifier] Failed to send email alert:', err.message);
+      console.error('[EmailNotifier] Delivery failed:', err.message);
       return { success: false, error: err.message };
     }
   }
-}
-
-// Export for ES6 module environments or attach to self in MV3 service workers
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = SecureEmailNotifier;
-} else {
-  self.SecureEmailNotifier = SecureEmailNotifier;
 }

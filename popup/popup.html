@@ -1,153 +1,92 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Claude Resilience</title>
-  <link rel="stylesheet" href="popup.css">
+  <meta charset="utf-8">
+  <title>Claude Resilience Settings</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      width: 280px;
+      padding: 16px;
+      margin: 0;
+      background: #ffffff;
+      color: #0f172a;
+    }
+    h3 {
+      margin: 0 0 4px 0;
+      font-size: 15px;
+      color: #ea580c;
+    }
+    p.desc {
+      font-size: 12px;
+      color: #64748b;
+      margin: 0 0 14px 0;
+    }
+    label {
+      font-size: 11px;
+      font-weight: 600;
+      display: block;
+      margin-top: 10px;
+      color: #334155;
+    }
+    input {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 7px 10px;
+      margin-top: 4px;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      font-size: 12px;
+    }
+    input:focus {
+      outline: none;
+      border-color: #ea580c;
+    }
+    button {
+      width: 100%;
+      margin-top: 16px;
+      padding: 9px;
+      background: #ea580c;
+      color: #ffffff;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 12px;
+    }
+    button:hover {
+      background: #c2410c;
+    }
+    #status {
+      font-size: 11px;
+      margin-top: 10px;
+      text-align: center;
+      min-height: 16px;
+    }
+    .metrics {
+      margin-top: 14px;
+      padding-top: 10px;
+      border-top: 1px solid #f1f5f9;
+      font-size: 11px;
+      color: #64748b;
+    }
+  </style>
 </head>
 <body>
-  <div class="container">
-    <!-- Header -->
-    <div class="header">
-      <div class="header-title">
-        <span class="icon">🚀</span>
-        <h1>Claude Resilience</h1>
-      </div>
-      <button id="settingsBtn" class="settings-btn" title="Settings">⚙️</button>
-    </div>
+  <h3>Claude Resilience</h3>
+  <p class="desc">Free Tier Recovery & Alerts</p>
 
-    <!-- Tabs -->
-    <div class="tabs">
-      <button class="tab-button active" data-tab="status">Status</button>
-      <button class="tab-button" data-tab="checkpoints">Saved Chats</button>
-      <button class="tab-button" data-tab="settings">Settings</button>
-    </div>
+  <label for="toEmail">Notification Email:</label>
+  <input type="email" id="toEmail" placeholder="your-email@gmail.com" />
 
-    <!-- Status Tab -->
-    <div id="status" class="tab-content active">
-      <div class="status-card">
-        <h2>Monitoring Status</h2>
-        <div id="statusMessage" class="status-message">
-          <span class="status-dot">●</span>
-          Ready to protect your chats
-        </div>
-        <p class="help-text">The extension monitors your Claude.ai conversations in real-time.</p>
+  <label for="apiKey">Resend API Key:</label>
+  <input type="password" id="apiKey" placeholder="re_123456789..." />
 
-        <div class="info-grid">
-          <div class="info-item">
-            <span class="label">Active Chats:</span>
-            <span id="activeChatCount">0</span>
-          </div>
-          <div class="info-item">
-            <span class="label">Saved Checkpoints:</span>
-            <span id="checkpointCount">0</span>
-          </div>
-        </div>
+  <button id="saveBtn">Save Settings</button>
+  <div id="status"></div>
 
-        <div class="features">
-          <h3>What We Monitor:</h3>
-          <ul>
-            <li>✓ Detects rate limit messages</li>
-            <li>✓ Auto-saves chat progress</li>
-            <li>✓ Monitors token availability</li>
-            <li>✓ Sends email notifications</li>
-            <li>✓ Helps you resume chats</li>
-          </ul>
-        </div>
-      </div>
-    </div>
-
-    <!-- Checkpoints Tab -->
-    <div id="checkpoints" class="tab-content">
-      <div class="checkpoints-section">
-        <h2>Saved Conversations</h2>
-        <div id="checkpointsList" class="checkpoints-list">
-          <p class="empty-message">No saved conversations yet. Once you hit a rate limit, your progress will be saved here.</p>
-        </div>
-      </div>
-    </div>
-
-    <!-- Settings Tab -->
-    <div id="settings" class="tab-content">
-      <div class="settings-section">
-        <h2>Email Configuration</h2>
-        
-        <div class="setting-group">
-          <label class="checkbox-label">
-            <input type="checkbox" id="emailEnabled" checked>
-            <span>Enable email notifications</span>
-          </label>
-        </div>
-
-        <div class="setting-group">
-          <label for="emailAddress">Email Address:</label>
-          <input 
-            type="email" 
-            id="emailAddress" 
-            placeholder="your-email@gmail.com"
-            class="input"
-          >
-          <p class="help-text">We'll send you notifications when tokens are available and when issues occur.</p>
-        </div>
-
-        <div class="setting-group">
-          <label for="emailService">Email Service:</label>
-          <select id="emailService" class="select">
-            <option value="gmail">Gmail (Recommended)</option>
-            <option value="sendgrid">Sendgrid</option>
-            <option value="manual">Manual (Copy notification text)</option>
-          </select>
-        </div>
-
-        <div id="gmailSettings" class="service-settings">
-          <h4>Gmail App Password Setup:</h4>
-          <ol class="steps">
-            <li>Enable 2-Factor Authentication on your Google account</li>
-            <li>Go to <a href="https://myaccount.google.com/apppasswords" target="_blank">myaccount.google.com/apppasswords</a></li>
-            <li>Generate an "App Password" for Mail</li>
-            <li>Paste it below (not your regular Gmail password)</li>
-          </ol>
-          <input 
-            type="password" 
-            id="gmailPassword" 
-            placeholder="xxxx-xxxx-xxxx-xxxx"
-            class="input"
-          >
-          <button id="testEmailBtn" class="button secondary">Test Email</button>
-        </div>
-
-        <div id="sendgridSettings" class="service-settings hidden">
-          <h4>Sendgrid API Key:</h4>
-          <p class="help-text">Get your API key from <a href="https://app.sendgrid.com/settings/api_keys" target="_blank">sendgrid.com</a></p>
-          <input 
-            type="password" 
-            id="sendgridApiKey" 
-            placeholder="SG...."
-            class="input"
-          >
-        </div>
-
-        <button id="saveSettingsBtn" class="button primary">Save Settings</button>
-
-        <div id="settingsMessage" class="message hidden"></div>
-      </div>
-
-      <div class="settings-section">
-        <h2>Advanced</h2>
-        <button id="clearDataBtn" class="button danger">Clear All Saved Data</button>
-        <p class="help-text">This will delete all checkpoints and conversation history.</p>
-      </div>
-
-      <div class="settings-section">
-        <h2>About</h2>
-        <p><strong>Claude Free Tier Resilience</strong> v1.0</p>
-        <p>Auto-saves your Claude.ai conversations when rate limits are hit and helps you resume seamlessly.</p>
-        <p style="font-size: 11px; color: #666;">
-          Created by Anthropic Claude • Works with claude.ai free tier
-        </p>
-      </div>
-    </div>
+  <div class="metrics" id="metrics">
+    Status: Connecting...
   </div>
 
   <script src="popup.js"></script>
